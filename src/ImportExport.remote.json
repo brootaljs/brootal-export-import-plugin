@@ -1,0 +1,28 @@
+{
+    "exportProxy": {
+        "static": true,
+        "method": "get",
+        "remote": "/export",
+        "accepts": [{
+            "arg": "filter",
+            "type": "object",
+            "http": {
+                "source": "query"
+            }
+        }],
+        "group": "read"
+    },
+    "importProxy": {
+        "static": true,
+        "method": "post",
+        "remote": "/import",
+        "accepts": [{
+            "arg": "file",
+            "type": "file",
+            "http": {
+                "source": "file"
+            }
+        }],
+        "group": "write"
+    }
+}
