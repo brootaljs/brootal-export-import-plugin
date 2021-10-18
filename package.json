@@ -1,11 +1,11 @@
 {
   "name": "@brootal/export-import-plugin",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "",
   "main": "dist/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "babel src -d dist"
+    "build": "babel src -d dist && cp src/ImportExport.remote.json dist"
   },
   "gitHooks": {
     "pre-commit": "sh patch_version.sh",
