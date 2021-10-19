@@ -39,7 +39,7 @@ function packCSV(data, opts) {
 /**
  * Add corresponding header to responce based on export type
  */
-function addExportHeaders(res, name, type) {
+function addExportHeaders(res, name, type, contentLength) {
   res.set('Cache-Control', 'max-age=0, no-cache, must-revalidate, proxy-revalidate');
   res.set('Last-Modified', new Date() + 'GMT');
   res.set('Content-Type', 'application/force-download');
@@ -47,10 +47,15 @@ function addExportHeaders(res, name, type) {
   res.set('Content-Disposition', `attachment; filename=${ name }.${ type }`);
   
   switch (type) {
+    case 'zip':
+      res.set('Content-Type', 'application/zip');
+      res.set('Content-Transfer-Encoding', 'binary');
+      res.set('Content-Length', contentLength);
+      break;
     case 'csv':
       res.set('Content-Type', 'application/octet-stream');
       res.set('Content-Transfer-Encoding', 'binary');
-      break
+      break;
     case 'json':
     default:
       res.set('Content-Type', 'application/json');
@@ -58,16 +63,45 @@ function addExportHeaders(res, name, type) {
   }
 }
 
+function deepFilter(data, exportRule) {
+  let where = {};
+
+  if (exportRule.foreignField) {
+    where[exportRule.foreignField] = { "$in": _.map(data || [], ({ _id }) => _id) }
+  } else if (exportRule.localField) {
+    where._id = {
+      "$in": _.reduce(data || [], (memo, item) => {
+        return memo.concat(item[exportRule.localField]);
+      }, [])
+    }
+  } else {
+    throw new Error("Error in exportWith description")
+  }
+
+  return where;
+}
+
 /**
  * Cascade export data from dependent services.
  * Calls Service.export on each of them and add result
  * to zip as separate files.
  */
-async function cascade(Service, filter, type, req, res, zip) {
-  const content = await Service.export(filter, req, res);
+async function cascadeExport(Service, filter, req, res, zip) {
+  let content;
+  try {
+    if (Service.export) {
+      content = await Service.export(filter, req, res);
+    } else {
+      content = await Service.exportJSON(filter, req, res);
+    }
+  } catch (e) {
+    error("| line : 68 | cascadeExport | e : ", e);
+  }
+
+  let serviceType = (Service.exportType || 'json').toLowerCase();
 
   let data;
-  switch (type) {
+  switch (serviceType) {
     case 'zip':
       data = content;
       break;
@@ -79,28 +113,62 @@ async function cascade(Service, filter, type, req, res, zip) {
       data = JSON.stringify(content);
       break;
   }
-  zip.addFile(`${ Service.name }.${ type }`, data);
   
   if (Service.exportWith) {
+    const innerZip = new AdmZip();
+
+    innerZip.addFile(`${ Service.name }.${ serviceType }`, data);
+
     await Promise.all(_.map(Service.exportWith || [], async exp => {
-      let where = {};
-
-      if (exp.foreignField) {
-        where[exp.foreignField] = { "$in": _.map(content || [], ({ _id }) => _id) }
-      } else if (exp.localField) {
-        where._id = {
-          "$in": _.reduce(content || [], (memo, item) => {
-            return memo.concat(item[exp.localField]);
-          }, [])
-        }
-      } else {
-        throw new Error("Error in exportWith description")
-      }
-
+      let where = deepFilter(content, exp);
       const deepService = Service.app.services[exp.model];
 
-      await cascade(deepService, { where }, deepService.exportType || 'json', req, res, zip)
-    }))
+      await cascadeExport(deepService, { where }, req, res, innerZip);
+    }));
+
+    data = innerZip.toBuffer();
+
+    serviceType = 'zip';
+  }
+
+  if (zip) zip.addFile(`${ Service.name }.${ serviceType }`, data);
+
+  return data;
+}
+
+async function cascadeImport(Service, buffer, req, res) {
+  if (Service.exportWith) {
+    const zip = new AdmZip(buffer);
+    const zipEntries = zip.getEntries();
+
+    try {
+      await Promise.all(_.map(zipEntries, async (zipEntry) => {
+        const buf = zipEntry.name.split("\.");
+        const ext = buf.pop();
+        const modelName = buf[0];
+        const deepService = Service.app.services[modelName];
+  
+        if (deepService.import) {
+          await deepService.import(zipEntry.getData(), req, res);
+        } else {
+          if (ext == 'zip') {
+            await cascadeImport(deepService, zipEntry.getData(), req, res);
+          } else {
+            await deepService.importJSON(zipEntry.getData(), req, res);
+          }
+        }
+      }));
+    } catch (e) {
+      console.log("ImportExport.plugin (line : 159) | cascadeImport | e : ", e);
+      throw e;
+    }
+    
+  } else {
+    if (Service.import) {
+      await Service.import(buffer, req, res);
+    } else {
+      await Service.importJSON(buffer, req, res);
+    }
   }
 }
 
@@ -108,9 +176,9 @@ export default () => {
   return {
     staticMethods: {
       /**
-       * Default export as json file. Can be redefined in service.
+       * Default export as json file.
        */
-      async export(filter, req, res) {
+      async exportJSON(filter, req, res) {
         let content;
         try {
           content = await this.find(filter);
@@ -123,21 +191,21 @@ export default () => {
         return content;
       },
       /**
-       * Default import of json file. Can be redefined in service.
+       * Default import of json file.
        */
-      async import(buffer, req, res) {
+      async importJSON(buffer, req, res) {
         let data;
         try {
           data = JSON.parse(buffer);
         } catch (e) {
-          console.log("DataTransfer.plugin (line : 85) | import | e : ", e);
+          throw new Error(`${this.name} parse error: ${e.message}`);
         }
 
         if (data) {
           try {
-            await this.create(data)
+            await this.create(data); //, { session })
           } catch (e) {
-            console.log("DataTransfer.plugin (line : 92) | import | e : ", e);
+            throw new Error(`${this.name} create error: ${e.message}`);
           }
         }
       },
@@ -146,25 +214,19 @@ export default () => {
        * initialize cascade or simple json export.
        */
       async exportProxy(filter = {}, req, res) {
-        const type = (this.exportType || 'json').toLowerCase();
+        let type = (this.exportType || 'json').toLowerCase();
+        if (this.exportWith) type = 'zip';
+        // console.log("ImportExport.plugin (line : 238) | EXPORT PROXY | type: ", type);
 
-        if (type === 'zip') {
-          const zip = new AdmZip();
-
-          await cascade(this, filter, 'json', req, res, zip);
-
-          const zipFileContents = zip.toBuffer();
-          if (res) {
-            res.set('Content-Disposition', `attachment; filename=${ this.name || 'data' }.zip`);
-            res.set('Content-Type', 'application/zip');
-            res.set('Content-Transfer-Encoding', 'binary');
-            res.set('Content-Length', zipFileContents.length);
-          }
-          
-          return zipFileContents;
-        } else {
-          return this.export(filter, req, res);
+        let data;
+        try {
+          data = await cascadeExport(this, filter, req, res);
+        } catch (e) {
+          console.log("ImportExport.plugin (line : 235) | exportProxy | e : ", e);
         }
+        addExportHeaders(res, this.name, type, data.length);
+
+        return data;
       },
       /**
        * First step of export sequence. Reads "file" from request and
@@ -173,7 +235,9 @@ export default () => {
        * as json.
        */
       async importProxy(file, req, res) {
-        const type = (this.exportType || 'json').toLowerCase();
+        // Transactions demands MongoDB 4.0 and Mongoose 5.2.0
+        // const session = await this.app.datasources.db.startSession();
+        // session.startTransaction();
 
         let buffer;
         try {
@@ -182,23 +246,10 @@ export default () => {
           console.log("Dataset.class (line : 305) | import | e : ", e);
         }
 
-        if (buffer) {
-          if (type === 'zip') {
-            const zip = new AdmZip(buffer);
-            const zipEntries = zip.getEntries();
+        if (buffer) await cascadeImport(this, buffer, req, res); //, session);
 
-            await Promise.all(_.map(zipEntries, async (zipEntry) => {
-              const buf = zipEntry.name.split("\.");
-              const ext = buf.pop();
-              const modelName = buf[0];
-              const Service = this.app.services[modelName];
-
-              if (Service) await Service.import(zipEntry.getData(), req, res);
-            }));
-          } else {
-            await this.import(buffer, req, res);
-          }
-        }
+        // await session.commitTransaction();
+        // session.endSession();
       }
     }
   }
