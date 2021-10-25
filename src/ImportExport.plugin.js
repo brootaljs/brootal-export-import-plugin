@@ -95,7 +95,8 @@ async function cascadeExport(Service, filter, req, res, zip) {
       content = await Service.exportJSON(filter, req, res);
     }
   } catch (e) {
-    error("| line : 68 | cascadeExport | e : ", e);
+    console.log("ImportExport.plugin (line : 98) | cascadeExport | e : ", e);
+    throw e;
   }
 
   let serviceType = (Service.exportType || 'json').toLowerCase();
@@ -136,7 +137,7 @@ async function cascadeExport(Service, filter, req, res, zip) {
   return data;
 }
 
-async function cascadeImport(Service, buffer, req, res) {
+async function cascadeImport(Service, buffer, req, res, session) {
   if (Service.exportWith) {
     const zip = new AdmZip(buffer);
     const zipEntries = zip.getEntries();
@@ -149,25 +150,27 @@ async function cascadeImport(Service, buffer, req, res) {
         const deepService = Service.app.services[modelName];
   
         if (deepService.import) {
-          await deepService.import(zipEntry.getData(), req, res);
+          await deepService.import(zipEntry.getData(), req, res, session);
         } else {
           if (ext == 'zip') {
-            await cascadeImport(deepService, zipEntry.getData(), req, res);
+            await cascadeImport(deepService, zipEntry.getData(), req, res, session);
           } else {
-            await deepService.importJSON(zipEntry.getData(), req, res);
+            await deepService.importJSON(zipEntry.getData(), req, res, session);
           }
         }
       }));
     } catch (e) {
       console.log("ImportExport.plugin (line : 159) | cascadeImport | e : ", e);
+      // await session.abortTransaction();
+
       throw e;
     }
     
   } else {
     if (Service.import) {
-      await Service.import(buffer, req, res);
+      await Service.import(buffer, req, res, session);
     } else {
-      await Service.importJSON(buffer, req, res);
+      await Service.importJSON(buffer, req, res, session);
     }
   }
 }
@@ -181,7 +184,8 @@ export default () => {
       async exportJSON(filter, req, res) {
         let content;
         try {
-          content = await this.find(filter);
+          content = await this.model.find(filter.where || {}, null, { autopopulate: false });
+          // content = await this.find(filter);
         } catch (e) {
           console.log("DataTransfer.plugin (line : 137) | export | e : ", e);
         }
@@ -201,9 +205,10 @@ export default () => {
           throw new Error(`${this.name} parse error: ${e.message}`);
         }
 
-        if (data) {
+        if (data && data.length) {
           try {
-            await this.create(data); //, { session })
+            await this.create(data);
+            // await this.create(data, { session });
           } catch (e) {
             throw new Error(`${this.name} create error: ${e.message}`);
           }
@@ -236,8 +241,13 @@ export default () => {
        */
       async importProxy(file, req, res) {
         // Transactions demands MongoDB 4.0 and Mongoose 5.2.0
-        // const session = await this.app.datasources.db.startSession();
-        // session.startTransaction();
+        let session;
+        try {
+          session = await this.app.datasources.db.startSession();
+          session.startTransaction();
+        } catch (e) {
+          console.log("ImportExport.plugin (line : 246) | importProxy | e : ", e);
+        }
 
         let buffer;
         try {
@@ -246,10 +256,10 @@ export default () => {
           console.log("Dataset.class (line : 305) | import | e : ", e);
         }
 
-        if (buffer) await cascadeImport(this, buffer, req, res); //, session);
+        if (buffer) await cascadeImport(this, buffer, req, res, session);
 
-        // await session.commitTransaction();
-        // session.endSession();
+        await session.commitTransaction();
+        session.endSession();
       }
     }
   }
