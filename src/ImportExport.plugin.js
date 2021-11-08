@@ -142,29 +142,26 @@ async function cascadeImport(Service, buffer, req, res, session) {
     const zip = new AdmZip(buffer);
     const zipEntries = zip.getEntries();
 
-    try {
-      await Promise.all(_.map(zipEntries, async (zipEntry) => {
-        const buf = zipEntry.name.split("\.");
-        const ext = buf.pop();
-        const modelName = buf[0];
-        const deepService = Service.app.services[modelName];
-  
-        if (deepService.import) {
-          await deepService.import(zipEntry.getData(), req, res, session);
-        } else {
-          if (ext == 'zip') {
-            await cascadeImport(deepService, zipEntry.getData(), req, res, session);
-          } else {
-            await deepService.importJSON(zipEntry.getData(), req, res, session);
-          }
-        }
-      }));
-    } catch (e) {
-      console.log("ImportExport.plugin (line : 159) | cascadeImport | e : ", e);
-      // await session.abortTransaction();
+    await Promise.all(_.map(zipEntries, async (zipEntry) => {
+      // zip created on osx full of useless garbage that breaks import process
+      if (!zipEntry || !zipEntry.name) return;
+      if (zipEntry.name[0] === '.') return;
 
-      throw e;
-    }
+      const buf = zipEntry.name.split("\.");
+      const ext = buf.pop();
+      const modelName = buf[0];
+      const deepService = Service.app.services[modelName];
+
+      if (deepService.import) {
+        await deepService.import(zipEntry.getData(), req, res, session);
+      } else {
+        if (ext == 'zip') {
+          await cascadeImport(deepService, zipEntry.getData(), req, res, session);
+        } else {
+          await deepService.importJSON(zipEntry.getData(), req, res, session);
+        }
+      }
+    }));
     
   } else {
     if (Service.import) {
@@ -197,7 +194,7 @@ export default () => {
       /**
        * Default import of json file.
        */
-      async importJSON(buffer, req, res) {
+      async importJSON(buffer, req, res, session) {
         let data;
         try {
           data = JSON.parse(buffer);
@@ -207,8 +204,7 @@ export default () => {
 
         if (data && data.length) {
           try {
-            await this.create(data);
-            // await this.create(data, { session });
+            await this.create(data, { session });
           } catch (e) {
             throw new Error(`${this.name} create error: ${e.message}`);
           }
@@ -256,7 +252,18 @@ export default () => {
           console.log("Dataset.class (line : 305) | import | e : ", e);
         }
 
-        if (buffer) await cascadeImport(this, buffer, req, res, session);
+        if (buffer) {
+          try {
+            await cascadeImport(this, buffer, req, res, session);
+          } catch (e) {
+            console.log("ImportExport.plugin (line : 266) | abortTransaction | e : ", e);
+            
+            await session.abortTransaction();
+            session.endSession();
+            
+            throw e;
+          }
+        }
 
         await session.commitTransaction();
         session.endSession();
