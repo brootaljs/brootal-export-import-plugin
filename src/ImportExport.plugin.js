@@ -182,7 +182,6 @@ export default () => {
         let content;
         try {
           content = await this.model.find(filter.where || {}, null, { autopopulate: false });
-          // content = await this.find(filter);
         } catch (e) {
           console.log("DataTransfer.plugin (line : 137) | export | e : ", e);
         }
@@ -217,7 +216,6 @@ export default () => {
       async exportProxy(filter = {}, req, res) {
         let type = (this.exportType || 'json').toLowerCase();
         if (this.exportWith) type = 'zip';
-        // console.log("ImportExport.plugin (line : 238) | EXPORT PROXY | type: ", type);
 
         let data;
         try {
@@ -246,10 +244,10 @@ export default () => {
         }
 
         let buffer;
-        try {
-          buffer = await streamToBuffer(fs.createReadStream(file.tempFilePath))
-        } catch (e) {
-          console.log("Dataset.class (line : 305) | import | e : ", e);
+        if (file.tempFilePath && file.tempFilePath.length) {
+          buffer = await streamToBuffer(fs.createReadStream(file.tempFilePath));
+        } else {
+          buffer = file.data;
         }
 
         if (buffer) {
@@ -257,7 +255,7 @@ export default () => {
             await cascadeImport(this, buffer, req, res, session);
           } catch (e) {
             console.log("ImportExport.plugin (line : 266) | abortTransaction | e : ", e);
-            
+
             await session.abortTransaction();
             session.endSession();
             
